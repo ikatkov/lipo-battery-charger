@@ -2,18 +2,18 @@
 #include "U8g2lib.h"
 #include "Countimer.h"
 #include "NewTone.h"
-#include "MCP4551.h"
-#include "RotaryEncoder.h"
+#include "MCP4131.h"
+#include <EncButton2.h>
 
 #define HALF_STEP 0
 
 const char NUMBER_FORMAT[] PROGMEM = "%6d";
 const char FLOAT_FORMAT[] PROGMEM = "%.2f";
 #define PRINT_DEC_POINTS 3
-#define MIN_DIGIPOT_RESISTANCE 113
-#define MAX_DIGIPOT_RESISTANCE 9670
+#define MIN_DIGIPOT_RESISTANCE 114
+#define MAX_DIGIPOT_RESISTANCE 9870
 #define EXTERNAL_RESISTOR 1000
-#define MCU_VOLTAGE 3.3
+#define MCU_VOLTAGE 5
 #define SHUNT_RESISTANCE 0.15
 
 static const uint32_t COMPUTE_POWER_INTERVAL = 1000; // ms
@@ -24,17 +24,27 @@ volatile uint16_t current;
 float voltage;
 float power;
 
-static const byte TONE_PIN = 4;
-static const byte ROTARY_PIN_1 = 2;
-static const byte ROTARY_PIN_2 = 3;
+#define TONE_PIN 10
+#define ROTARY_PIN_1 7
+#define ROTARY_PIN_2 8
+#define ROTARY_PIN_BTN 9
+
+#define CH1_EN 17 // A3 since pin1&pin0 are HW UART i.e. Serial()
+#define CH1_ISENSE 3
+
+#define CH2_EN 2
+#define CH3_EN 3
+
+#define MCP4131_CH1_CS 4
+
+EncButton2<EB_ENCBTN> enc(INPUT, 7, 8, 9);
 
 //=================================
 // UI
 //=================================
-U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
-RotaryEncoder *encoder = nullptr;
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 
-MCP4551 myMCP4551;
+MCP4131 potentiometer(MCP4131_CH1_CS);
 Countimer timer;
 uint16_t encoderPosition = 256;
 
@@ -42,45 +52,60 @@ void reDrawRegularScreen();
 
 uint16_t computeMaxChargeCurrent()
 {
-  // I = 1200*1V/R
-  float resistance = EXTERNAL_RESISTOR + MIN_DIGIPOT_RESISTANCE + (256 - encoderPosition) * (float(MAX_DIGIPOT_RESISTANCE) - MIN_DIGIPOT_RESISTANCE) / 256;
-  return 1200 / resistance * 1000;
+    // I = 1200*1V/R
+    float resistance = EXTERNAL_RESISTOR + MIN_DIGIPOT_RESISTANCE + (128 - encoderPosition) * (float(MAX_DIGIPOT_RESISTANCE) - MIN_DIGIPOT_RESISTANCE) / 128;
+    return 1200 / resistance * 1000;
+}
+
+void readCurrent()
+{
+    uint16_t sensorValue = analogRead(A0);
+    float shuntVoltage = (sensorValue + 0.5) * MCU_VOLTAGE / 1024;
+    current = shuntVoltage / 20 / SHUNT_RESISTANCE * 1000;
+    Serial.print("A0:");
+    Serial.print(sensorValue);
+    Serial.print("\tshuntVoltage:");
+    Serial.print(shuntVoltage);
+    Serial.print("\tcurrent:");
+    Serial.println(current);
 }
 
 void reDrawRegularScreen()
 {
-  // Serial.println(F("reDrawRegularScreen"));
+    Serial.println(F("reDrawRegularScreen"));
 
-  char buffer[10];
-  display.firstPage();
-  do
-  {
-    // current
-    display.setFont(u8g2_font_helvB14_tr);
-    snprintf_P(buffer, 7, NUMBER_FORMAT, current);
-    display.drawStr(60, 16, buffer);
-    display.setFont(u8g2_font_6x13_tr);
-    display.drawStr(115, 16, "mA");
+    readCurrent();
 
-    // limit current
-    display.setFont(u8g2_font_helvB14_tr);
-    // Serial.println(current[selectedChannel]);
-    snprintf_P(buffer, 7, NUMBER_FORMAT, computeMaxChargeCurrent());
-    display.drawStr(60, 32, buffer);
-    display.setFont(u8g2_font_6x13_tr);
-    display.drawStr(115, 32, "mA");
+    char buffer[10];
+    display.firstPage();
+    do
+    {
+        // current
+        display.setFont(u8g2_font_helvB14_tr);
+        snprintf_P(buffer, 7, NUMBER_FORMAT, current);
+        display.drawStr(60, 16, buffer);
+        display.setFont(u8g2_font_6x13_tr);
+        display.drawStr(115, 16, "mA");
 
-    //==============================
-    // mAh
-    //==============================
-    display.setDrawColor(1);
-    display.setFont(u8g2_font_helvB14_tr);
-    snprintf_P(buffer, 7, NUMBER_FORMAT, (int)round(power));
-    display.drawStr(0, 18, buffer);
-    display.setFont(u8g2_font_6x13_tr);
-    display.drawStr(20, 32, "mAh");
+        // limit current
+        display.setFont(u8g2_font_helvB14_tr);
+        // Serial.println(current[selectedChannel]);
+        snprintf_P(buffer, 7, NUMBER_FORMAT, computeMaxChargeCurrent());
+        display.drawStr(60, 32, buffer);
+        display.setFont(u8g2_font_6x13_tr);
+        display.drawStr(115, 32, "mA");
 
-  } while (display.nextPage());
+        //==============================
+        // mAh
+        //==============================
+        display.setDrawColor(1);
+        display.setFont(u8g2_font_helvB14_tr);
+        snprintf_P(buffer, 7, NUMBER_FORMAT, (int)round(power));
+        display.drawStr(0, 18, buffer);
+        display.setFont(u8g2_font_6x13_tr);
+        display.drawStr(20, 32, "mAh");
+
+    } while (display.nextPage());
 }
 
 // void computePower()
@@ -101,75 +126,76 @@ void reDrawRegularScreen()
 
 void checkPosition()
 {
-  encoder->tick(); // just call tick() to check the state.
 }
 
 void setup()
 {
-  Serial.begin(38400);
+    pinMode(CH1_EN, OUTPUT);
+    pinMode(CH2_EN, OUTPUT);
+    pinMode(CH3_EN, OUTPUT);
 
-  while (!Serial)
-  {
-    delay(1);
-  }
+    pinMode(CH1_EN, OUTPUT);
+    pinMode(CH2_EN, OUTPUT);
+    pinMode(CH3_EN, OUTPUT);
 
-  Serial.println(F("booting up"));
-  display.begin();
+    digitalWrite(CH1_EN, LOW);
+    digitalWrite(CH2_EN, LOW);
+    digitalWrite(CH3_EN, LOW);
 
-  myMCP4551.begin();
-  myMCP4551.setWiper(256);
+    Serial.begin(9600);
 
-  timer.setCounter(MAX_CHARGE_TIME, 00, 0, CountType::COUNT_UP, NULL);
-  // timer.setInterval(computePower, 1000);
-  timer.start();
+    while (!Serial)
+    {
+        delay(1);
+    }
 
-  encoder = new RotaryEncoder(ROTARY_PIN_1, ROTARY_PIN_2, RotaryEncoder::LatchMode::TWO03);
-  encoder->setPosition(256);
-  // register interrupt routine
-  attachInterrupt(digitalPinToInterrupt(ROTARY_PIN_1), checkPosition, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ROTARY_PIN_2), checkPosition, CHANGE);
+    Serial.println(F("booting up"));
+    display.begin();
 
-  // ready beep
-  NewTone(TONE_PIN, 750, 50);
-  delay(100);
-  NewTone(TONE_PIN, 1000, 50);
+    potentiometer.writeWiper(128);
+
+    timer.setCounter(MAX_CHARGE_TIME, 00, 0, CountType::COUNT_UP, NULL);
+    timer.setInterval(reDrawRegularScreen, 500);
+    timer.start();
+
+    // ready beep
+    NewTone(TONE_PIN, 750, 50);
+    delay(100);
+    NewTone(TONE_PIN, 1000, 50);
+    delay(100);
+    noNewTone(TONE_PIN);
 }
 
 // the loop function runs over and over again forever
 void loop()
 {
-  timer.run();
-  reDrawRegularScreen();
-  uint16_t sensorValue = analogRead(A0);
-  float shuntVoltage = (sensorValue + 0.5) * MCU_VOLTAGE / 1024;
-  current = shuntVoltage/ 20 / SHUNT_RESISTANCE *1000;
-  Serial.print("A0:");
-  Serial.print(sensorValue);
-  Serial.print("\tshuntVoltage:");
-  Serial.print(shuntVoltage);
-  Serial.print("\tcurrent:");
-  Serial.println(current);
-
-  // encoder->tick(); // just call tick() to check the state.
-  long newPos = encoder->getPosition();
-  if (encoderPosition != newPos)
-  {
-    if (newPos > 256)
+    timer.run();
+    enc.tick();
+    if (enc.turn())
     {
-      newPos = 256;
-    }
-    else if (newPos < 0)
-    {
-      newPos = 0;
-    }
-    encoder->setPosition(newPos);
-    myMCP4551.setWiper(newPos);
-    encoderPosition = newPos;
-    Serial.print("pos:");
-    Serial.print(newPos);
-    Serial.print(" wiper:");
-    Serial.println(newPos);
-  } // if
+        Serial.println("turn");
 
-   delay(50);
+        // можно опросить ещё:
+        // Serial.println(enc.counter);  // вывести счётчик
+        // Serial.println(enc.fast());   // проверить быстрый поворот
+        Serial.println(enc.dir()); // направление поворота
+        Serial.println(enc.counter);
+        reDrawRegularScreen();
+
+        // if (newPos > 128)
+        // {
+        //     newPos = 128;
+        // }
+        // else if (newPos < 0)
+        // {
+        //     newPos = 0;
+        // }
+        // // encoder->setPosition(newPos);
+        // potentiometer.writeWiper(newPos);
+        // encoderPosition = newPos;
+        // Serial.print("pos:");
+        // Serial.print(newPos);
+        // Serial.print(" wiper:");
+        // Serial.println(newPos);
+    }
 }
